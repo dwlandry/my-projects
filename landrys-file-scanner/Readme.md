@@ -75,6 +75,55 @@ The tool generates a CSV file containing the paths of the files that match the s
 - Windows OS
 - C++ compiler (e.g., MSVC, MinGW)
 
+#### Downloading MinGW
+
+MinGW can be downloaded from [MinGW-w64](https://www.mingw-w64.org/). Follow the installation instructions provided on the site.
+
+### Adding `g++` to PATH
+
+To use `g++` from the command line, you need to add its directory to your PATH environment variable.
+
+#### Temporarily Add to PATH
+
+##### PowerShell:
+
+```powershell
+$env:PATH="C:\Users\<username>\AppData\Local\mingw64\bin;" + $env:PATH
+```
+
+##### Command Prompt:
+
+```cmd
+SET PATH=C:\Users\<username>\AppData\Local\mingw64\bin;%PATH%
+```
+
+Verify that `g++` is accessible:
+
+```bash
+g++ --version
+```
+
+Expected Output:
+
+```
+g++ (MinGW <version>)
+Copyright (C) <year> Free Software Foundation, Inc.
+...
+```
+
+#### Permanently Add to PATH
+
+1. Open **System Properties** > **Advanced** > **Environment Variables**.
+2. Under "System Variables," find `Path` and click **Edit**.
+3. Add the following to the list:
+   ```
+   C:\Users\<username>\AppData\Local\mingw64\bin
+   ```
+4. Restart PowerShell or Command Prompt and verify with:
+   ```bash
+   g++ --version
+   ```
+
 ### Steps
 
 1. Clone the repository:
