@@ -81,13 +81,13 @@ The tool generates a CSV file containing the paths of the files that match the s
 
    ```bash
    git clone <repository_url>
-   cd file_scanner
+   cd landrys-file-scanner
    ```
 
 2. Compile the code:
 
    ```bash
-   g++ -std=c++17 -Ofast -march=native -flto -fomit-frame-pointer -fno-exceptions -fno-rtti -DNDEBUG -o file_scanner file_scanner.cpp
+   g++ -std=c++17 -Ofast -march=native -flto -fomit-frame-pointer -fno-exceptions -fno-rtti -DNDEBUG -o landrys-file-scanner landrys-file-scanner.cpp
    ```
 
 ### Explanation of Compilation Options
@@ -106,7 +106,7 @@ The tool generates a CSV file containing the paths of the files that match the s
 After building the project, run the executable with the desired options:
 
 ```bash
-file_scanner --path=C:\Data
+landrys-file-scanner --path=C:\Data
 ```
 
 ### Troubleshooting
@@ -115,7 +115,7 @@ file_scanner --path=C:\Data
   - Ensure MinGW is properly installed.
   - Use the full path to `g++.exe` if necessary:
     ```bash
-    "C:\Users\<username>\AppData\Local\mingw64\bin\g++.exe" -std=c++17 -Ofast -march=native -flto -fomit-frame-pointer -fno-exceptions -fno-rtti -DNDEBUG -o file_scanner file_scanner.cpp
+    "C:\Users\<username>\AppData\Local\mingw64\bin\g++.exe" -std=c++17 -Ofast -march=native -flto -fomit-frame-pointer -fno-exceptions -fno-rtti -DNDEBUG -o landrys-file-scanner landrys-file-scanner.cpp
     ```
 
 ## Performance
