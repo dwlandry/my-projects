@@ -228,10 +228,11 @@ void process_directory(ScanContext &ctx, const std::wstring &dir, std::string &l
 
             if (utf8_len > 0)
             {
-                size_t old_size = local_out_buf.size();
-                local_out_buf.resize(old_size + utf8_len + 1);
-                WideCharToMultiByte(CP_UTF8, 0, full_path.c_str(), slen, &local_out_buf[old_size], utf8_len, NULL, NULL);
-                local_out_buf[old_size + utf8_len] = '\n';
+                std::string utf8_path(utf8_len, '\0');
+                WideCharToMultiByte(CP_UTF8, 0, full_path.c_str(), slen, utf8_path.data(), utf8_len, NULL, NULL);
+
+                // Add to the output buffer with a newline
+                local_out_buf += utf8_path + "\n";
 
                 ctx.file_count.fetch_add(1, std::memory_order_relaxed);
 
@@ -240,6 +241,11 @@ void process_directory(ScanContext &ctx, const std::wstring &dir, std::string &l
                 {
                     flush_buffer(ctx, local_out_buf);
                 }
+            }
+            else
+            {
+                // Log the error or handle the file path gracefully
+                std::cerr << "Error converting file path to UTF-8: " << GetLastError() << "\n";
             }
         }
     } while (FindNextFileW(hFind, &fdata));
@@ -309,6 +315,11 @@ int main(int argc, char *argv[])
         return 1;
     }
 
+    // Write BOM for UTF-8
+    const unsigned char bom[] = {0xEF, 0xBB, 0xBF};
+    fwrite(bom, sizeof(bom), 1, ctx.out_fp);
+
+    // Write CSV header
     const char *header = "File Path\n";
     fwrite(header, 1, strlen(header), ctx.out_fp);
 
