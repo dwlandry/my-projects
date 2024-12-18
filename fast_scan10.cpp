@@ -11,25 +11,46 @@
 #include <iostream>
 #include <algorithm>
 
-// Default values
-static std::wstring ROOT_DIR;
-static std::wstring PREFIX = L"";
-static size_t OUTPUT_BUFFER_FLUSH_COUNT = 5000; // Default buffer size in lines
-static std::string OUTPUT_FILE = "file_list.csv";
-static std::vector<std::wstring> file_types;
+//----------------------------------------------------------
+// Data structures and global settings
+//----------------------------------------------------------
+
+// Holds all scanning context shared across threads
+struct ScanContext
+{
+    std::wstring ROOT_DIR;
+    std::wstring PREFIX = L"";
+    size_t OUTPUT_BUFFER_FLUSH_COUNT = 5000; // Default buffer size in lines
+    std::string OUTPUT_FILE = "file_list.csv";
+    std::vector<std::wstring> file_types;
+
+    std::mutex q_m;
+    std::condition_variable q_cv;
+    std::queue<std::wstring> dir_queue;
+    std::atomic<int> active_dir_count{0};
+    std::atomic<bool> done{false};
+
+    std::mutex out_m;
+    FILE *out_fp = nullptr;
+
+    std::atomic<long long> file_count{0};
+};
 
 static const int NUM_THREADS = std::thread::hardware_concurrency();
 
-std::mutex q_m;
-std::condition_variable q_cv;
-std::queue<std::wstring> dir_queue;
-std::atomic<int> active_dir_count(0);
-std::atomic<bool> done(false);
+//----------------------------------------------------------
+// Function Declarations
+//----------------------------------------------------------
+void print_help();
+bool parse_arguments(int argc, char *argv[], ScanContext &ctx);
+bool initialize_directory_queue(ScanContext &ctx);
+void flush_buffer(ScanContext &ctx, std::string &buffer);
+void process_directory(ScanContext &ctx, const std::wstring &dir, std::string &local_out_buf);
+void directory_processing_worker(ScanContext &ctx);
 
-std::mutex out_m;
-FILE *out_fp = nullptr;
-
-std::atomic<long long> file_count(0);
+//----------------------------------------------------------
+// Function Implementations
+//----------------------------------------------------------
 
 void print_help()
 {
@@ -46,7 +67,104 @@ void print_help()
                  "  --help       Display this help message.\n";
 }
 
-void process_directory(const std::wstring &dir, std::string &local_out_buf)
+bool parse_arguments(int argc, char *argv[], ScanContext &ctx)
+{
+    for (int i = 1; i < argc; ++i)
+    {
+        std::string arg = argv[i];
+        if (arg.find("--path=") == 0)
+        {
+            ctx.ROOT_DIR = std::wstring(arg.begin() + 7, arg.end());
+        }
+        else if (arg.find("--prefix=") == 0)
+        {
+            ctx.PREFIX = std::wstring(arg.begin() + 9, arg.end());
+        }
+        else if (arg.find("--buffer=") == 0)
+        {
+            ctx.OUTPUT_BUFFER_FLUSH_COUNT = std::stoul(arg.substr(9)) * 1000 / 256;
+        }
+        else if (arg.find("--output=") == 0)
+        {
+            ctx.OUTPUT_FILE = arg.substr(9);
+        }
+        else if (arg.find("--filetypes=") == 0)
+        {
+            std::wstring extensions = std::wstring(arg.begin() + 12, arg.end());
+            size_t pos = 0;
+            while ((pos = extensions.find(L",")) != std::wstring::npos)
+            {
+                ctx.file_types.push_back(extensions.substr(0, pos));
+                extensions.erase(0, pos + 1);
+            }
+            ctx.file_types.push_back(extensions);
+        }
+        else if (arg == "--help")
+        {
+            print_help();
+            return false;
+        }
+    }
+
+    if (ctx.ROOT_DIR.empty())
+    {
+        std::cerr << "Error: --path is required.\n\n";
+        print_help();
+        return false;
+    }
+
+    return true;
+}
+
+// Initializes the directory queue with the top-level directories that match PREFIX
+bool initialize_directory_queue(ScanContext &ctx)
+{
+    WIN32_FIND_DATAW fdata;
+    std::wstring top_search = ctx.ROOT_DIR + L"\\*";
+    HANDLE hFind = FindFirstFileW(top_search.c_str(), &fdata);
+    if (hFind == INVALID_HANDLE_VALUE)
+    {
+        return false;
+    }
+
+    do
+    {
+        if ((fdata.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
+        {
+            // Skip '.' and '..'
+            if (fdata.cFileName[0] == L'.' &&
+                (fdata.cFileName[1] == 0 || (fdata.cFileName[1] == L'.' && fdata.cFileName[2] == 0)))
+            {
+                continue;
+            }
+
+            if (ctx.PREFIX.empty() || _wcsnicmp(fdata.cFileName, ctx.PREFIX.c_str(), ctx.PREFIX.size()) == 0)
+            {
+                std::wstring subdir = ctx.ROOT_DIR + L"\\" + fdata.cFileName;
+                {
+                    std::lock_guard<std::mutex> lk(ctx.q_m);
+                    ctx.dir_queue.push(subdir);
+                    ctx.active_dir_count++;
+                }
+            }
+        }
+    } while (FindNextFileW(hFind, &fdata));
+    FindClose(hFind);
+
+    return (ctx.active_dir_count > 0);
+}
+
+// Flushes the local buffer to the output file safely
+void flush_buffer(ScanContext &ctx, std::string &buffer)
+{
+    std::lock_guard<std::mutex> lk_out(ctx.out_m);
+    fwrite(buffer.data(), 1, buffer.size(), ctx.out_fp);
+    buffer.clear();
+}
+
+// Processes a single directory: finds subdirectories (pushing them to queue)
+// and files (writing them to output if they match conditions)
+void process_directory(ScanContext &ctx, const std::wstring &dir, std::string &local_out_buf)
 {
     WIN32_FIND_DATAW fdata;
     std::wstring search_pattern = dir + L"\\*";
@@ -54,7 +172,7 @@ void process_directory(const std::wstring &dir, std::string &local_out_buf)
 
     if (hFind == INVALID_HANDLE_VALUE)
     {
-        active_dir_count--;
+        ctx.active_dir_count--;
         return;
     }
 
@@ -71,28 +189,28 @@ void process_directory(const std::wstring &dir, std::string &local_out_buf)
 
             std::wstring subdir = dir + L"\\" + fdata.cFileName;
             // Check prefix if specified
-            if (!PREFIX.empty() && subdir.find(PREFIX) == std::wstring::npos)
+            if (!ctx.PREFIX.empty() && subdir.find(ctx.PREFIX) == std::wstring::npos)
             {
                 continue;
             }
 
             {
-                std::lock_guard<std::mutex> lk(q_m);
-                dir_queue.push(subdir);
-                active_dir_count++;
+                std::lock_guard<std::mutex> lk(ctx.q_m);
+                ctx.dir_queue.push(subdir);
+                ctx.active_dir_count++;
             }
-            q_cv.notify_one();
+            ctx.q_cv.notify_one();
         }
         else
         {
             std::wstring full_path = dir + L"\\" + fdata.cFileName;
 
             // File extension filtering
-            if (!file_types.empty())
+            if (!ctx.file_types.empty())
             {
                 std::wstring file_ext = full_path.substr(full_path.find_last_of(L".") + 1);
                 bool match = false;
-                for (const auto &ext : file_types)
+                for (const auto &ext : ctx.file_types)
                 {
                     if (_wcsicmp(file_ext.c_str(), ext.c_str()) == 0)
                     {
@@ -115,196 +233,128 @@ void process_directory(const std::wstring &dir, std::string &local_out_buf)
                 WideCharToMultiByte(CP_UTF8, 0, full_path.c_str(), slen, &local_out_buf[old_size], utf8_len, NULL, NULL);
                 local_out_buf[old_size + utf8_len] = '\n';
 
-                file_count.fetch_add(1, std::memory_order_relaxed);
+                ctx.file_count.fetch_add(1, std::memory_order_relaxed);
 
-                // Flush if the buffer is large enough
-                if (local_out_buf.size() >= OUTPUT_BUFFER_FLUSH_COUNT * 256)
+                // Flush if buffer is large enough
+                if (local_out_buf.size() >= ctx.OUTPUT_BUFFER_FLUSH_COUNT * 256)
                 {
-                    std::lock_guard<std::mutex> lk_out(out_m);
-                    fwrite(local_out_buf.data(), 1, local_out_buf.size(), out_fp);
-                    local_out_buf.clear();
+                    flush_buffer(ctx, local_out_buf);
                 }
             }
         }
     } while (FindNextFileW(hFind, &fdata));
     FindClose(hFind);
 
-    active_dir_count--;
+    ctx.active_dir_count--;
 }
 
-void worker_thread()
+// The main worker thread function that continuously processes directories from the queue
+void directory_processing_worker(ScanContext &ctx)
 {
     std::string local_out_buf;
-    local_out_buf.reserve(256 * OUTPUT_BUFFER_FLUSH_COUNT);
+    local_out_buf.reserve(256 * ctx.OUTPUT_BUFFER_FLUSH_COUNT);
 
     for (;;)
     {
         std::wstring current_dir;
         {
-            std::unique_lock<std::mutex> lk(q_m);
-            q_cv.wait(lk, []
-                      { return !dir_queue.empty() || done.load(); });
+            std::unique_lock<std::mutex> lk(ctx.q_m);
+            ctx.q_cv.wait(lk, [&]
+                          { return !ctx.dir_queue.empty() || ctx.done.load(); });
 
-            if (done.load() && dir_queue.empty())
+            if (ctx.done.load() && ctx.dir_queue.empty())
             {
                 // No more directories to process
                 break;
             }
 
-            if (!dir_queue.empty())
+            if (!ctx.dir_queue.empty())
             {
-                current_dir = dir_queue.front();
-                dir_queue.pop();
+                current_dir = ctx.dir_queue.front();
+                ctx.dir_queue.pop();
             }
         }
 
         if (!current_dir.empty())
         {
-            process_directory(current_dir, local_out_buf);
+            process_directory(ctx, current_dir, local_out_buf);
         }
     }
 
     // Flush remaining buffer
     if (!local_out_buf.empty())
     {
-        std::lock_guard<std::mutex> lk_out(out_m);
-        fwrite(local_out_buf.data(), 1, local_out_buf.size(), out_fp);
+        flush_buffer(ctx, local_out_buf);
     }
 }
 
+//----------------------------------------------------------
+// Main
+//----------------------------------------------------------
 int main(int argc, char *argv[])
 {
-    // Parse command-line arguments
-    for (int i = 1; i < argc; ++i)
+    ScanContext ctx;
+    if (!parse_arguments(argc, argv, ctx))
     {
-        std::string arg = argv[i];
-        if (arg.find("--path=") == 0)
-        {
-            ROOT_DIR = std::wstring(arg.begin() + 7, arg.end());
-        }
-        else if (arg.find("--prefix=") == 0)
-        {
-            PREFIX = std::wstring(arg.begin() + 9, arg.end());
-        }
-        else if (arg.find("--buffer=") == 0)
-        {
-            OUTPUT_BUFFER_FLUSH_COUNT = std::stoul(arg.substr(9)) * 1000 / 256;
-        }
-        else if (arg.find("--output=") == 0)
-        {
-            OUTPUT_FILE = arg.substr(9);
-        }
-        else if (arg.find("--filetypes=") == 0)
-        {
-            std::wstring extensions = std::wstring(arg.begin() + 12, arg.end());
-            size_t pos = 0;
-            while ((pos = extensions.find(L",")) != std::wstring::npos)
-            {
-                file_types.push_back(extensions.substr(0, pos));
-                extensions.erase(0, pos + 1);
-            }
-            file_types.push_back(extensions);
-        }
-        else if (arg == "--help")
-        {
-            print_help();
-            return 0;
-        }
-    }
-
-    if (ROOT_DIR.empty())
-    {
-        std::cerr << "Error: --path is required.\n\n";
-        print_help();
+        // Help or error message already printed
         return 1;
     }
 
     auto start_time = std::chrono::steady_clock::now();
 
-    out_fp = fopen(OUTPUT_FILE.c_str(), "wb");
-    if (!out_fp)
+    ctx.out_fp = fopen(ctx.OUTPUT_FILE.c_str(), "wb");
+    if (!ctx.out_fp)
     {
-        printf("Failed to open output file.\n");
+        std::cerr << "Failed to open output file.\n";
         return 1;
     }
 
     const char *header = "File Path\n";
-    fwrite(header, 1, strlen(header), out_fp);
+    fwrite(header, 1, strlen(header), ctx.out_fp);
 
-    // Initialize directory queue with initial directories
+    // Initialize the directory queue
+    if (!initialize_directory_queue(ctx))
     {
-        WIN32_FIND_DATAW fdata;
-        std::wstring top_search = ROOT_DIR + L"\\*";
-        HANDLE hFind = FindFirstFileW(top_search.c_str(), &fdata);
-        if (hFind != INVALID_HANDLE_VALUE)
-        {
-            do
-            {
-                if ((fdata.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
-                {
-                    // Skip '.' and '..'
-                    if (fdata.cFileName[0] == L'.' &&
-                        (fdata.cFileName[1] == 0 || (fdata.cFileName[1] == L'.' && fdata.cFileName[2] == 0)))
-                    {
-                        continue;
-                    }
-
-                    // Check prefix
-                    if (PREFIX.empty() || _wcsnicmp(fdata.cFileName, PREFIX.c_str(), PREFIX.size()) == 0)
-                    {
-                        std::wstring subdir = ROOT_DIR + L"\\" + fdata.cFileName;
-                        {
-                            std::lock_guard<std::mutex> lk(q_m);
-                            dir_queue.push(subdir);
-                            active_dir_count++;
-                        }
-                    }
-                }
-            } while (FindNextFileW(hFind, &fdata));
-            FindClose(hFind);
-        }
-    }
-
-    if (active_dir_count == 0)
-    {
-        fclose(out_fp);
-        printf("No matching directories found.\n");
+        fclose(ctx.out_fp);
+        std::cout << "No matching directories found.\n";
         return 0;
     }
 
+    // Launch worker threads
     std::vector<std::thread> threads;
+    threads.reserve(NUM_THREADS);
     for (int i = 0; i < NUM_THREADS; i++)
     {
-        threads.emplace_back(worker_thread);
+        threads.emplace_back(directory_processing_worker, std::ref(ctx));
     }
 
     // Wait until all directories are processed
     for (;;)
     {
-        std::unique_lock<std::mutex> lk(q_m);
-        if (active_dir_count.load() == 0 && dir_queue.empty())
+        std::unique_lock<std::mutex> lk(ctx.q_m);
+        if (ctx.active_dir_count.load() == 0 && ctx.dir_queue.empty())
             break;
-        q_cv.wait_for(lk, std::chrono::milliseconds(50));
+        ctx.q_cv.wait_for(lk, std::chrono::milliseconds(50));
     }
 
     // Signal threads to finish
-    done.store(true);
-    q_cv.notify_all();
+    ctx.done.store(true);
+    ctx.q_cv.notify_all();
 
     for (auto &t : threads)
         t.join();
 
-    fclose(out_fp);
+    fclose(ctx.out_fp);
 
     auto end_time = std::chrono::steady_clock::now();
     double elapsed_seconds = std::chrono::duration<double>(end_time - start_time).count();
-    long long final_count = file_count.load();
+    long long final_count = ctx.file_count.load();
 
-    printf("File list export completed in %.2f seconds\n", elapsed_seconds);
-    printf("Processed %lld files\n", final_count);
+    std::cout << "File list export completed in " << elapsed_seconds << " seconds\n";
+    std::cout << "Processed " << final_count << " files\n";
     if (elapsed_seconds > 0)
     {
-        printf("Average processing speed: %.2f files/second\n", (double)final_count / elapsed_seconds);
+        std::cout << "Average processing speed: " << (double)final_count / elapsed_seconds << " files/second\n";
     }
 
     return 0;
