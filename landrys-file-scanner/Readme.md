@@ -17,7 +17,7 @@ The File Scanner is a multithreaded tool written in C++ that efficiently scans d
 ### Command-Line Options
 
 ```
-Usage: file_scanner --path=<root_path> [options]
+Usage: landrys-file-scanner --path=<root_path> [options]
 
 Options:
   --path       Path to the root directory to scan (required).
@@ -37,7 +37,7 @@ Options:
 Scan all files in the directory `C:\Data`:
 
 ```bash
-file_scanner --path=C:\Data
+landrys-file-scanner --path=C:\Data
 ```
 
 #### Filter by Folder Prefix
@@ -45,7 +45,7 @@ file_scanner --path=C:\Data
 Scan only folders starting with `Proj`:
 
 ```bash
-file_scanner --path=C:\Data --prefix=Proj
+landrys-file-scanner --path=C:\Data --prefix=Proj
 ```
 
 #### Filter by File Types
@@ -53,7 +53,7 @@ file_scanner --path=C:\Data --prefix=Proj
 Include only files with `.doc` or `.pdf` extensions:
 
 ```bash
-file_scanner --path=C:\Data --filetypes=doc,pdf
+landrys-file-scanner --path=C:\Data --filetypes=doc,pdf
 ```
 
 #### Custom Output File and Buffer Size
@@ -61,7 +61,7 @@ file_scanner --path=C:\Data --filetypes=doc,pdf
 Set the output file to `output.csv` and use a buffer size of 10,000 lines:
 
 ```bash
-file_scanner --path=C:\Data --output=output.csv --buffer=10000
+landrys-file-scanner --path=C:\Data --output=output.csv --buffer=10000
 ```
 
 ## Output
